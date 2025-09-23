@@ -5,7 +5,7 @@ module FidServices
     CACHE_LAST_MOD = "last_mod:%s"
     CACHE_ENTRIES= "entries:%s"
 
-    def self.fetch(url)
+    def fetch(url)
       etag = Rails.cache.read(CACHE_ETAG % url)
       last_mod = Rails.cache.read(CACHE_LAST_MOD % url)
         conn = Faraday.new(url:) do |f|
@@ -34,6 +34,12 @@ module FidServices
           Rails.cache.write(CACHE_ENTRIES % url, entries, expires_in: 30.minutes)
           entries
         end
+    rescue StandardError => e
+      Rails.logger.error(e.inspect)
+      return unless e.respond_to?(:backtrace) && e.backtrace.present?
+
+      Rails.logger.error(e.backtrace.join("\n"))
+      Rails.logger.error("StandardError: #{e.message}")
     end
   end
 end
