@@ -30,7 +30,7 @@ h3 {
 
 <ol>
 <% @feed.each do |e| %>
-    <li><a href="<%= e.url %>" target=\"_blank\"><%= e.title %></a>
+  <li><a href="<%= e.url %>" target=<%= "_blank_#{e.id}"%>"><%= e.title %></a>
       <!-- <small><%= e.author %> | <%= e.published %></small></li> -->
       <small><%= e.author || e.url %> | <%= distance_of_time_in_words(Time.now, e.published) %></small></li>
 <% end %>
