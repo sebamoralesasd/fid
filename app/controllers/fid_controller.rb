@@ -5,9 +5,9 @@ class FidController < ApplicationController
     # TODO: mover.
     urls = FidServices::FeedSources.new.urls("sources")
     @feed = []
-    providers = urls.flat_map do |url|
+    urls.flat_map do |url|
       @feed += FidServices::FetchFeed.new.fetch(url)
-      end
+    end
     @feed = order(@feed)
   end
 

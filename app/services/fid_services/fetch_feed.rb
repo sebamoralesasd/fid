@@ -3,7 +3,7 @@ module FidServices
     CACHE_XML = "xml:%s"
     CACHE_ETAG = "etag:%s"
     CACHE_LAST_MOD = "last_mod:%s"
-    CACHE_ENTRIES= "entries:%s"
+    CACHE_ENTRIES = "entries:%s"
 
     def fetch(url)
       etag = Rails.cache.read(CACHE_ETAG % url)
@@ -20,13 +20,15 @@ module FidServices
         response = conn.get(nil, nil, headers)
 
         if response.status == 304
-          Rails.logger.info "Acá"
+          Rails.logger.debug "Status 304 not modified at #{url}"
           Rails.cache.read(CACHE_ENTRIES % url)
         else
           xml = response.body
           Rails.cache.write(CACHE_XML % url, xml, expires_in: 30.minutes)
-          Rails.cache.write(CACHE_ETAG % url, response.headers["etag"], expires_in: 30.minutes) if response.headers["etag"].present?
-          Rails.cache.write(CACHE_LAST_MOD % url, response.headers["last-modified"], expires_in: 30.minutes) if response.headers["last-modified"].present?
+          Rails.cache.write(CACHE_ETAG % url, response.headers["etag"],
+                            expires_in: 30.minutes) if response.headers["etag"].present?
+          Rails.cache.write(CACHE_LAST_MOD % url, response.headers["last-modified"],
+                            expires_in: 30.minutes) if response.headers["last-modified"].present?
 
           feed_data = Feedjira.parse(xml)
           entries = feed_data.entries
@@ -35,11 +37,7 @@ module FidServices
           entries
         end
     rescue StandardError => e
-      Rails.logger.error(e.inspect)
-      return unless e.respond_to?(:backtrace) && e.backtrace.present?
-
-      Rails.logger.error(e.backtrace.join("\n"))
-      Rails.logger.error("StandardError: #{e.message}")
+      report_exception e
     end
   end
 end
