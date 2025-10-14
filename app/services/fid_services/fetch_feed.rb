@@ -5,6 +5,19 @@ module FidServices
     CACHE_LAST_MOD = "last_mod:%s"
     CACHE_ENTRIES = "entries:%s"
 
+    def call(url)
+      data = from_cache(url)
+      return data unless data.nil?
+
+      fetch(url)
+    end
+
+    private
+
+    def from_cache(url)
+      Rails.cache.read(CACHE_ENTRIES % url)
+    end
+
     def fetch(url)
       etag = Rails.cache.read(CACHE_ETAG % url)
       last_mod = Rails.cache.read(CACHE_LAST_MOD % url)
