@@ -6,7 +6,7 @@ class FidController < ApplicationController
     urls = FidServices::FeedSources.new.urls("sources")
     @feed = []
     urls.flat_map do |url|
-      @feed += FidServices::FetchFeed.new.call(url)
+      @feed += FidServices::FetchFeed.new(1.day).call(url)
     end
     @feed = order(@feed)
   end
