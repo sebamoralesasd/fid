@@ -22,7 +22,7 @@ Rails.application.configure do
   # config.asset_host = "http://assets.example.com"
 
   # Disable ActiveStorage to save memory (not using file uploads)
-  config.active_storage.service = nil
+  # config.active_storage.service = nil
 
   # Assume all access to the app is happening through a SSL-terminating reverse proxy.
   config.assume_ssl = true
@@ -54,7 +54,7 @@ Rails.application.configure do
   config.solid_queue.connects_to = { database: { writing: :queue } }
 
   # Disable ActionCable in production - use async adapter to save memory
-  config.action_cable.adapter = :async
+  # config.action_cable.adapter = :async
 
   # Disable ActionMailer deliveries in production to save memory (not sending emails)
   config.action_mailer.perform_deliveries = false
