@@ -12,7 +12,7 @@ if Rails.env.production?
         Rails.logger.error "[MEMORY] Failed to get memory stats: #{e.message}"
       end
 
-      sleep 300 # Log every 5 minutes
+      sleep 1800 # Log every 30 minutes
     end
   end
 end
