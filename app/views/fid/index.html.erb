@@ -22,9 +22,37 @@ h3 {
   text-align: center;
 }
 
+nav {
+  text-align: center;
+  margin: 1rem 0;
+  padding: 0.5rem;
+  /* background: #f5f5f5; */
+}
+
+nav a {
+  margin: 0 1rem;
+  text-decoration: none;
+  color: #333;
+  font-weight: bold;
+}
+
+nav a:hover {
+  color: #0066cc;
+}
+
+nav a.active {
+  color: #0066cc;
+  border-bottom: 2px solid #0066cc;
+}
+
 </style>
   </head>
   <body>
+<nav>
+  <%= link_to "Feed", fid_index_path, class: "active" %>
+  <%= link_to "News", news_index_path %>
+</nav>
+
 <h1>Feed</h1>
 <h3>My own private feed. &#x1F485;</h3>
 
