@@ -15,12 +15,20 @@
 - Module namespacing: Use `module FidServices` for service classes in `app/services/fid_services/`
 - Service pattern: Initialize with config, implement `#call` method
 - Named parameters: Use `url:` syntax for keyword arguments (e.g., `Faraday.new(url:)`)
+- Routes: Use `resources :controller, only: %w[index]` for resource routes
 
 ## Error Handling & Logging
 - Use `rescue StandardError => e` for broad exception catching
 - Report exceptions via `report_exception e` (configured in initializers/exception_reporting.rb)
 - Handle network timeouts (5s timeout, 3s open_timeout for Faraday)
 - Use `Rails.logger.info/debug/error` for logging
+- Return empty arrays `[]` as safe defaults on fetch failures
+
+## Caching Patterns
+- Use `Rails.cache.fetch(key, expires_in: 1.hour)` for read-through caching
+- Cache keys: Use format strings like `"entries:#{VERSION}:%s" % identifier`
+- Respect HTTP conditional requests: Store/check ETags and Last-Modified headers
+- Default expiration: 1 hour for feeds, 1 day for aggregated content
 
 ## Dependencies
 - RSS/Atom parsing: `feedjira`, HTTP client: `faraday`
