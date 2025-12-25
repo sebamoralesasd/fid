@@ -1,6 +1,8 @@
 require_relative "../services/fid_services/feed_sources"
 
 class NewsController < ApplicationController
+  include Paginatable
+
   def index
     # TODO: mover.
     urls = FidServices::FeedSources.new.urls("news")
@@ -9,6 +11,10 @@ class NewsController < ApplicationController
       @feed += FidServices::FetchFeed.new(1.hour).call(url)
     end
     @feed = order(@feed)
+
+    page = (params[:page] || 1).to_i
+    @pagination = paginate_array(@feed, page: page, per_page: 50)
+    @feed = @pagination[:items]
   end
 
   def order(feed)

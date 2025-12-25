@@ -46,6 +46,28 @@ nav a.active {
   border-bottom: 2px solid #0066cc;
 }
 
+.pagination {
+  text-align: center;
+  margin: 2rem 0;
+  padding: 1rem;
+}
+
+.pagination a {
+  color: #0066cc;
+  text-decoration: none;
+  padding: 0.5rem 1rem;
+  font-weight: bold;
+}
+
+.pagination a:hover {
+  text-decoration: underline;
+}
+
+.pagination .disabled {
+  color: #999;
+  padding: 0.5rem 1rem;
+}
+
 </style>
   </head>
   <body>
@@ -61,5 +83,8 @@ nav a.active {
     <small><%= e.author || e.url %> | <%= distance_of_time_in_words(Time.now, e.published) %></small></li>
 <% end %>
 </ol>
+
+<%= pagination_links(@pagination, :news_index_path) %>
+
   </body>
 </html>
