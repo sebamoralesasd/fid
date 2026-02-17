@@ -1,13 +1,13 @@
-- url: 'https://dosenlaciudad.substack.com/feed'
-- url: 'https://world.hey.com/dhh/feed.atom' 
+- url: "https://dosenlaciudad.substack.com/feed"
+- url: "https://world.hey.com/dhh/feed.atom"
 # - url: 'https://feeds.feedburner.com/ThePragmaticEngineer'
-- url: 'https://buttondown.com/hillelwayne/rss'
-- url: 'https://icebergrosario.substack.com/feed'
+- url: "https://buttondown.com/hillelwayne/rss"
+- url: "https://icebergrosario.substack.com/feed"
 # - url: 'https://fabiensanglard.net/rss.xml'
-- url: 'https://daniel.haxx.se/blog/feed/'
-- url: 'https://newsletter.pragmaticengineer.com/feed'
+- url: "https://daniel.haxx.se/blog/feed/"
+- url: "https://newsletter.pragmaticengineer.com/feed"
 # - url: 'https://www.inkandswitch.com/index.xml'
-- url: 'https://tldr.tech/api/rss/tech'
+- url: "https://tldr.tech/api/rss/tech"
 # - url: 'https://netflixtechblog.com/feed'
-- url: 'https://www.421.news/rss/'
-- url: 'https://alejandrogalliano.substack.com/feed'
+- url: "https://www.421.news/es/rss/"
+- url: "https://alejandrogalliano.substack.com/feed"
