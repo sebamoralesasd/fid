@@ -6,11 +6,13 @@ class FidController < ApplicationController
   def index
     # TODO: mover.
     urls = FidServices::FeedSources.new.urls("sources")
-    @feed = []
-    urls.flat_map do |url|
-      @feed += FidServices::FetchFeed.new(1.day).call(url)
+    fetcher = FidServices::FetchFeed.new(1.day)
+    threads = urls.map do |url|
+      Thread.new do
+        Rails.application.executor.wrap { fetcher.call(url) }
+      end
     end
-    @feed = order(@feed)
+    @feed = order(threads.flat_map(&:value))
 
     page = (params[:page] || 1).to_i
     @pagination = paginate_array(@feed, page: page, per_page: 50)
