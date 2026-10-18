@@ -66,3 +66,6 @@ group :test do
 end
 
 gem "rubocop", "~> 1.80"
+
+# json 3.x rejects the `quirks_mode` option still passed by ActiveSupport 8.0.x
+gem "json", "~> 2.16"
