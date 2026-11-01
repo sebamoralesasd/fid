@@ -1,11 +1,13 @@
 module FidServices
   class FetchFeed
-    CACHE_VERSION = "v2"
+    CACHE_VERSION = "v3"
     MAX_ENTRIES = 40
+    STALE_TTL = 7.days
     Item = Data.define(:id, :title, :url, :author, :published)
     CACHE_ETAG = "etag:#{CACHE_VERSION}:%s"
     CACHE_LAST_MOD = "last_mod:#{CACHE_VERSION}:%s"
     CACHE_ENTRIES = "entries:#{CACHE_VERSION}:%s"
+    CACHE_FRESH = "fresh:#{CACHE_VERSION}:%s"
 
     def initialize(expiration_time = 1.hour)
       @expiration_time = expiration_time
@@ -22,7 +24,13 @@ module FidServices
     private
 
     def from_cache(url)
+      return unless Rails.cache.exist?(CACHE_FRESH % url)
+
       Rails.cache.read(CACHE_ENTRIES % url)
+    end
+
+    def mark_fresh(url)
+      Rails.cache.write(CACHE_FRESH % url, true, expires_in: @expiration_time)
     end
 
     def connection_for(url)
@@ -45,18 +53,25 @@ module FidServices
 
     def fetch(url)
       response = request(url)
-      if response.status == 304
-        Rails.logger.debug "Status 304 not modified at #{url}"
-        return []
-      end
+      return not_modified(url) if response.status == 304
 
       store_validators(url, response.headers)
-      items = parse(response.body)
-      Rails.cache.write(CACHE_ENTRIES % url, items, expires_in: @expiration_time)
-      items
+      store_items(url, parse(response.body))
     rescue StandardError => e
       report_exception e
       []
+    end
+
+    def not_modified(url)
+      Rails.logger.debug "Status 304 not modified at #{url}"
+      mark_fresh(url)
+      Rails.cache.read(CACHE_ENTRIES % url) || []
+    end
+
+    def store_items(url, items)
+      Rails.cache.write(CACHE_ENTRIES % url, items, expires_in: STALE_TTL)
+      mark_fresh(url)
+      items
     end
 
     def request(url)
@@ -64,6 +79,8 @@ module FidServices
     end
 
     def conditional_headers(url)
+      return {} unless Rails.cache.exist?(CACHE_ENTRIES % url)
+
       {
         "If-None-Match" => Rails.cache.read(CACHE_ETAG % url),
         "If-Modified-Since" => Rails.cache.read(CACHE_LAST_MOD % url)
@@ -76,7 +93,7 @@ module FidServices
     end
 
     def write_header(key, value)
-      Rails.cache.write(key, value, expires_in: @expiration_time) if value.present?
+      Rails.cache.write(key, value, expires_in: STALE_TTL) if value.present?
     end
 
     def parse(xml)
