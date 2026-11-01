@@ -1,0 +1,481 @@
+#!/usr/bin/env ruby
+# Agent-facing CLI: answers the questions and runs the commands agents repeated
+# across sessions of this repo. Stdlib only and no Rails boot unless a command
+# needs one. Add a subcommand with `command`; it returns a Hash, the renderer
+# does the rest. Exit codes: 0 ok, 1 check failed, 2 usage error.
+require "json"
+require "open3"
+require "optparse"
+require "yaml"
+
+ROOT = File.expand_path("..", __dir__)
+Dir.chdir(ROOT)
+
+COMMANDS = {}
+Command = Struct.new(:name, :summary, :usage, :options, :run)
+Failure = Class.new(StandardError)
+
+def command(name, summary, usage: "", options: nil, &run)
+  COMMANDS[name] = Command.new(name, summary, usage, options, run)
+end
+
+def sh(*cmd)
+  out, status = Open3.capture2e(*cmd)
+  [ out, status.success? ]
+end
+
+def read(path)
+  File.exist?(path) ? File.read(path) : ""
+end
+
+def line_count(path)
+  File.foreach(path).count
+rescue ArgumentError, Errno::EISDIR
+  0
+end
+
+def require_gems!
+  out, ok = sh("bundle", "check")
+  raise Failure, "deps_missing: run `bundle install`\n#{out.lines.first(3).join}" unless ok
+end
+
+# Rails runner, returning the value the snippet printed after the marker.
+MARKER = "AGENT_CLI_RESULT="
+def rails_json(code)
+  out, ok = sh("bin/rails", "runner", code)
+  line = out.lines.reverse.find { |l| l.start_with?(MARKER) }
+  raise Failure, "runner_failed\n#{trim_trace(out)}" unless ok && line
+
+  JSON.parse(line.delete_prefix(MARKER))
+end
+
+def trim_trace(out, max = 12)
+  out.lines.reject { |l| l.match?(/^\s+from /) }.first(max).join.strip
+end
+
+def feed_urls(name)
+  YAML.safe_load(read("config/#{name}.yaml")).map { |h| h["url"].to_s }.uniq
+end
+
+command "map", "Tracked source files with line counts", usage: "[DIR_PREFIX]" do |_opts, args|
+  out, = sh("git", "ls-files")
+  skip = %r{\A(public|vendor|\.github|\.kamal|bin/)|db/.*schema|\.(png|ico|svg|keep)\z}
+  files = out.lines(chomp: true).reject { |f| f.match?(skip) }
+  files.select! { |f| f.start_with?(args.first) } if args.first
+  { files: files.size, loc: files.sum { |f| line_count(f) }, rows: files.map { |f| "#{line_count(f)} #{f}" } }
+end
+
+OUTLINE = {
+  ".rb" => /^\s*(class |module |def |private$|include |[A-Z][A-Z_]+ =|[A-Z]\w+ = Data)/,
+  ".erb" => /<%(?!=|#)|<%=.*\b(render|pagination_links|link_to)\b/
+}.freeze
+
+command "outline", "Line-numbered structure of a file; use instead of rereading it", usage: "FILE..." do |_opts, args|
+  raise OptionParser::MissingArgument, "FILE" if args.empty?
+
+  files = args.map do |path|
+    raise Failure, "not_found: #{path}" unless File.file?(path)
+
+    pattern = OUTLINE[File.extname(path)]
+    rows = File.readlines(path, chomp: true).each_with_index.filter_map do |text, i|
+      "#{i + 1}:#{text.strip}" if pattern && text.match?(pattern)
+    end
+    { file: path, lines: line_count(path), rows:, note: pattern ? nil : "no outline for this type" }
+  end
+  { files: }
+end
+
+command "sources", "Feed URLs per view (fid=sources.yaml, news=news.yaml)" do
+  fid = feed_urls("sources")
+  news = feed_urls("news")
+  { fid_count: fid.size, news_count: news.size, total: fid.size + news.size, fid:, news: }
+end
+
+command "feed", "How feeds are fetched and cached: keys, limits, TTLs, fields views use" do
+  src = read("app/services/fid_services/fetch_feed.rb")
+  version = src[/CACHE_VERSION = "(\w+)"/, 1]
+  ttls = Dir["app/controllers/*_controller.rb"].sort.filter_map do |f|
+    ttl = read(f)[/FetchFeed\.new\(([^)]*)\)/, 1]
+    "#{File.basename(f, '_controller.rb')}=#{ttl}" if ttl
+  end
+  {
+    file: "app/services/fid_services/fetch_feed.rb",
+    cache_version: version,
+    max_entries: src[/MAX_ENTRIES = (\d+)/, 1]&.to_i,
+    item_fields: src[/Data\.define\(([^)]*)\)/, 1]&.delete(":"),
+    keys: src.scan(/CACHE_(?!VERSION)\w+ = "([^"]*)"/).flatten.map { |k| k.sub("\#{CACHE_VERSION}", version.to_s) },
+    ttls:,
+    default_ttl: src[/expiration_time = ([\w.]+)/, 1],
+    timeouts: "open=#{src[/open_timeout = (\d+)/, 1]}s read=#{src[/\.timeout = (\d+)/, 1]}s",
+    fields_used_by_views: Dir["app/views/{fid,news}/*.erb"].flat_map { |f|
+ read(f).scan(/\be\.(\w+)/)
+    }.flatten.uniq.sort,
+    known_bug: src.match?(/status == 304.*?return \[\]/m) ? "304 returns [] so the feed vanishes from the page" : nil
+  }
+end
+
+command "runtime", "Deploy and RAM config: versions, puma, queue, cache, jobs, monitor" do
+  deploy = read("config/deploy.yml")
+  active_env = deploy[/^\s+clear:\n(.*?)(?=^\S|\z)/m, 1].to_s.lines.grep_v(/^\s*(#|$)/).map(&:strip)
+  recurring = YAML.safe_load(read("config/recurring.yml"), aliases: true) || {}
+  {
+    ruby: read(".ruby-version").strip,
+    rails: read("Gemfile.lock")[/^\s+rails \(([\d.]+)\)/, 1],
+    puma_threads: read("config/puma.rb")[/RAILS_MAX_THREADS", (\d+)/, 1],
+    deploy_env: active_env,
+    cache_store: { dev: :memory_store, test: :null_store, prod: :solid_cache_store },
+    cache_max_size: read("config/cache.yml")[/max_size: <%= ([\w.]+)/, 1],
+    queue_adapter: read("config/environments/production.rb")[/queue_adapter = :(\w+)/, 1],
+    jobs: Dir["app/jobs/*.rb"].map { |f| File.basename(f, ".rb") } - %w[application_job],
+    recurring: recurring.transform_values { |v| v.keys },
+    memory_log: "log tag [MEMORY], every #{read('config/initializers/memory_monitor.rb')[/sleep (\d+)/,
+                                                                                         1]}s, prod only",
+    tests_hit_network: !read("test/test_helper.rb").match?(/webmock|vcr/i)
+  }
+end
+
+command "ram", "Status of docs/reduccion-ram.md items, verified against the code" do
+  fetch = read("app/services/fid_services/fetch_feed.rb")
+  app = Dir["app/**/*.rb"].map { |f| read(f) }.join
+  deploy = read("config/deploy.yml")
+  application = read("config/application.rb")
+  checks = {
+    "A item_struct_and_limit" => fetch.include?("Data.define") && fetch.include?("MAX_ENTRIES"),
+    "B merged_cache_key" => app.include?("merged:"),
+    "F no_solid_queue_in_puma" => !deploy.match?(/^\s+SOLID_QUEUE_IN_PUMA: true/),
+    "F no_rails_all" => !application.include?('require "rails/all"'),
+    "F no_jbuilder" => !read("Gemfile").match?(/^gem "jbuilder"/),
+    "F no_thruster" => !read("Gemfile").match?(/^gem "thruster"/),
+    "F threads_2" => deploy.match?(/^\s+RAILS_MAX_THREADS: 2/),
+    "F no_ps_monitor" => !read("config/initializers/memory_monitor.rb").include?("ps -o"),
+    "G malloc_arena" => deploy.match?(/^\s+MALLOC_ARENA_MAX/),
+    "bug 304_keeps_feed" => !fetch.match?(/status == 304.*?return \[\]/m)
+  }
+  done, pending = checks.partition { |_, ok| ok }.map { |group| group.map(&:first) }
+  note = "doc says nothing is implemented; code wins" if done.any? && read("docs/reduccion-ram.md").include?("nada implementado")
+  { done_count: done.size, pending_count: pending.size, order: "A>B>G>F", done:, pending:, doc_stale: note }
+end
+
+command "recent", "Recent commits plus dirty files, or the files of one commit",
+        usage: "[SHA]", options: ->(o, opts) {
+                                   o.on("-n N", Integer, "commits to list (default 10)") { |v|
+ opts[:n] = v
+                                   }
+        } do |opts, args|
+  if args.first
+    out, ok = sh("git", "show", "--stat", "--format=%h %ad %s", "--date=short", args.first)
+    raise Failure, "unknown_commit: #{args.first}" unless ok
+
+    next { commit: out.lines.first.strip, rows: out.lines.drop(1).map(&:strip).reject(&:empty?) }
+  end
+  log, = sh("git", "log", "-n", (opts[:n] || 10).to_s, "--format=%h %ad %s", "--date=short")
+  dirty, = sh("git", "status", "--short")
+  { commits: log.lines(chomp: true), dirty: dirty.lines(chomp: true).map(&:strip) }
+end
+
+def lint_files(args, all)
+  return [] if all
+  return args unless args.empty?
+
+  tracked, = sh("git", "diff", "--name-only", "HEAD")
+  untracked, = sh("git", "ls-files", "--others", "--exclude-standard")
+  (tracked.lines + untracked.lines).map(&:strip).select { |f| f.end_with?(".rb") && File.exist?(f) }
+end
+
+def offenses(*args, stdin: nil)
+  out, = Open3.capture2("bin/rubocop", "--force-exclusion", "--format", "json", *args, stdin_data: stdin.to_s, err: File::NULL)
+  JSON.parse(out)["files"]
+rescue JSON::ParserError
+  raise Failure, "rubocop_failed: run `bin/rubocop` for the raw error"
+end
+
+def fingerprint(offense)
+  "#{offense['cop_name']}|#{offense['message']}"
+end
+
+# Offenses HEAD already had, so a change is judged without `git stash`.
+def baseline(path)
+  source, ok = Open3.capture2("git", "show", "HEAD:#{path}", err: File::NULL)
+  return [] unless ok
+
+  offenses("--stdin", path, stdin: source).flat_map { |f| f["offenses"] }.map { |o| fingerprint(o) }
+end
+
+command "lint", "Rubocop on changed files; separates new offenses from those already in HEAD",
+        usage: "[FILE...]", options: ->(o, opts) {
+                                       o.on("--all", "whole repo, no baseline") {
+ opts[:all] = true
+                                       }
+        } do |opts, args|
+  require_gems!
+  files = lint_files(args, opts[:all])
+  next { files: 0, offenses: 0, new: 0 } if files.empty? && !opts[:all]
+
+  results = offenses(*files)
+  rows = []
+  pre_existing = 0
+  results.each do |file|
+    known = opts[:all] ? [] : baseline(file["path"])
+    file["offenses"].each do |o|
+      if (index = known.index(fingerprint(o)))
+        known.delete_at(index)
+        pre_existing += 1
+      else
+        rows << "#{file['path']}:#{o.dig('location', 'start_line')} #{o['cop_name']} #{o['message']}"
+      end
+    end
+  end
+  { files: results.size, offenses: rows.size + pre_existing, new: rows.size, pre_existing:, rows:,
+    _exit: rows.empty? ? 0 : 1 }
+end
+
+command "test", "bin/rails test with summary and failures only (hits real feeds, ~8s)",
+        usage: "[PATH[:LINE]...]" do |_opts, args|
+  require_gems!
+  out, ok = sh("bin/rails", "test", *args)
+  summary = out[/^\d+ runs?, .*$/]
+  raise Failure, "test_boot_failed\n#{trim_trace(out)}" unless summary
+
+  failures = out.split(/\n(?=(?:Failure|Error):\n)/).drop(1).map { |f| f.lines.first(6).join.strip }
+  { ok:, summary:, seconds: out[/Finished in ([\d.]+)s/, 1]&.to_f&.round(1), failures:, _exit: ok ? 0 : 1 }
+end
+
+PROBE = <<~'RUBY'
+  xml = %(<rss version="2.0"><channel><title>T</title>) + (1..ITEMS).map { |i|
+    %(<item><title>t#{i}</title><link>http://x/#{i}</link><description>#{"x" * 1000}</description>) +
+      (i > 1 ? "<pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate>" : "") + "</item>"
+  }.join + "</channel></rss>"
+  Rails.cache = ActiveSupport::Cache::MemoryStore.new
+  fetcher = FidServices::FetchFeed.new
+  errors = []
+  fetcher.define_singleton_method(:report_exception) { |e| errors << "#{e.class}: #{e.message}" }
+  live = LIVE
+  url = live || "http://x/feed"
+  unless live
+    status = STATUS
+    fetcher.define_singleton_method(:connection_for) do |_u|
+      Faraday.new do |c|
+        c.response :raise_error
+        c.adapter(:test) { |s| s.get("/") { [ status, {}, xml ] } }
+      end
+    end
+  end
+  t0 = Time.now
+  items = fetcher.call(url)
+  cold = Time.now - t0
+  t0 = Time.now
+  fetcher.call(url)
+  puts "AGENT_CLI_RESULT=" + JSON.generate(
+    url:, entries: items.size, cold_s: cold.round(3), cached_s: (Time.now - t0).round(4),
+    cached: Rails.cache.read(FidServices::FetchFeed::CACHE_ENTRIES % url)&.size,
+    item_class: items.first&.class&.name, first: items.first&.to_h&.transform_values(&:to_s), errors:
+  )
+RUBY
+
+command "probe", "Run FetchFeed end to end, offline stub by default, isolated cache",
+        options: lambda { |o, opts|
+          o.on("--items N", Integer, "stubbed entries (default 50)") { |v| opts[:items] = v }
+          o.on("--status N", Integer, "stubbed HTTP status (default 200)") { |v| opts[:status] = v }
+          o.on("--live URL", "fetch a real feed instead") { |v| opts[:live] = v }
+        } do |opts, _args|
+  require_gems!
+  code = PROBE.sub("ITEMS", (opts[:items] || 50).to_s).sub("STATUS", (opts[:status] || 200).to_s).sub("LIVE") {
+ opts[:live].inspect
+  }
+  result = rails_json(code)
+  result.merge("_exit" => result["errors"].empty? ? 0 : 1)
+end
+
+command "eval", "bin/rails runner on a snippet; output trimmed, no stack frames", usage: "RUBY_CODE" do |_opts, args|
+  raise OptionParser::MissingArgument, "RUBY_CODE" if args.empty?
+
+  require_gems!
+  out, ok = sh("bin/rails", "runner", args.join(" "))
+  { ok:, output: trim_trace(out, 40), _exit: ok ? 0 : 1 }
+end
+
+command "gem", "Locate a bundled gem and grep its lib/ without guessing paths", usage: "NAME [REGEX]" do |_opts, args|
+  raise OptionParser::MissingArgument, "NAME" if args.empty?
+
+  out, ok = sh("bundle", "info", args.first, "--path")
+  raise Failure, "gem_not_found: #{args.first}" unless ok
+
+  path = out.strip
+  files = Dir["#{path}/lib/**/*.rb"]
+  next { path:, lib_files: files.size, rows: files.first(30).map { |f| f.delete_prefix("#{path}/") } } unless args[1]
+
+  regex = Regexp.new(args[1])
+  hits = files.flat_map do |f|
+    File.readlines(f, chomp: true).each_with_index.filter_map do |text, i|
+      "#{f.delete_prefix("#{path}/")}:#{i + 1}:#{text.strip}" if text.match?(regex)
+    end
+  end
+  { path:, hits: hits.size, rows: hits.first(40) }
+end
+
+# Which subcommand replaces a native tool call. First match per label; a shell
+# one-liner can hit several labels.
+ROUTES = {
+  "lint" => /\bbin\/rubocop\b/,
+  "test" => /\bbin\/rails test\b/,
+  "probe" => /FetchFeed|scratchpad\/t\.rb|\$f\b.*rails runner/m,
+  "eval" => /\bbin\/rails runner\b/,
+  "recent" => /\bgit (log|show)\b/,
+  "map" => /\bgit ls-files\b|\bwc -l\b/,
+  "sources" => %r{(cat|sed|wc)\b.*config/(sources|news)\.yaml}m,
+  "runtime" => %r{(cat|sed|head)\b.*(config/(puma|cache|queue|recurring|deploy)|Dockerfile|memory_monitor)}m,
+  "feed" => %r{(cat|sed)\b.*(fid_services|app/views)}m,
+  "gem" => /gem contents|\/gems\/feedjira/
+}.freeze
+
+READ_ROUTES = {
+  %r{config/(sources|news)\.yaml} => "sources",
+  %r{config/(puma|cache|queue|recurring|deploy|environments/production)|memory_monitor} => "runtime",
+  %r{fid_services/|app/views/} => "feed",
+  %r{app/(controllers|jobs)/} => "outline"
+}.freeze
+
+def transcript_calls(skip)
+  dir = File.expand_path("~/.claude/projects/#{ROOT.gsub('/', '-')}")
+  Dir["#{dir}/**/*.jsonl"].reject { |f|
+    skip.any? { |s|
+ f.include?(s)
+    }
+  }.sort_by { |f| File.mtime(f) }.flat_map do |file|
+    uses = {}
+    sizes = Hash.new(0)
+    File.foreach(file) do |line|
+      content = JSON.parse(line).dig("message", "content")
+      next unless content.is_a?(Array)
+
+      content.grep(Hash).each do |block|
+        uses[block["id"]] ||= block if block["type"] == "tool_use"
+        sizes[block["tool_use_id"]] = block["content"].to_s.bytesize if block["type"] == "tool_result"
+      end
+    rescue JSON::ParserError, TypeError
+      next
+    end
+    uses.map { |id, b| { session: File.basename(file)[0, 8], name: b["name"], input: b["input"], bytes: sizes[id] } }
+  end
+end
+
+def labels_for(call)
+  case call[:name]
+  when "Bash"
+    text = call[:input]["command"].to_s
+    return [ "agent-cli" ] if text.include?("agent-cli")
+
+    labels = ROUTES.select { |_, re| text.match?(re) }.keys
+    labels.delete("eval") if labels.include?("probe")
+    labels
+  when "Read"
+    path = call[:input]["file_path"].to_s
+    READ_ROUTES.filter_map { |re, label| label if path.match?(re) }.first(1)
+  else
+    []
+  end
+end
+
+command "repeats", "Mine this repo's Claude transcripts for repeated calls and CLI adoption",
+        options: ->(o, opts) {
+                   o.on("--skip ID", "session id prefix to exclude, repeatable") { |v|
+ (opts[:skip] ||= []) << v
+                   }
+        } do |opts, _args|
+  calls = transcript_calls(opts[:skip] || [])
+  by_label = Hash.new { |h, k| h[k] = { calls: 0, bytes: 0, sessions: [] } }
+  calls.each do |call|
+    labels_for(call).each do |label|
+      row = by_label[label]
+      row[:calls] += 1
+      row[:bytes] += call[:bytes]
+      row[:sessions] |= [ call[:session] ]
+    end
+  end
+  reads = calls.select { |c| c[:name] == "Read" }.group_by { |c| c[:input]["file_path"].to_s.delete_prefix("#{ROOT}/") }
+  adopted = by_label.delete("agent-cli")
+  {
+    tool_calls: calls.size,
+    result_bytes: calls.sum { |c| c[:bytes] },
+    agent_cli_calls: adopted ? adopted[:calls] : 0,
+    bypassed: by_label.sort_by { |_, v| -v[:calls] }.map do |label, v|
+      "#{label} calls=#{v[:calls]} bytes=#{v[:bytes]} sessions=#{v[:sessions].size}"
+    end,
+    reread_files: reads.select { |_, v| v.size > 1 }.map { |path, v| "#{v.size} #{path}" }.sort_by { |r| -r.to_i }
+  }
+end
+
+def scalar_line(value)
+  case value
+  when Hash then value.map { |k, v| "#{k}=#{v.is_a?(Array) ? v.join(',') : v}" }.join(" ")
+  when Array then value.join(" ")
+  else value.to_s
+  end
+end
+
+def render(hash)
+  hash.each do |key, value|
+    next if key.to_s == "_exit" || value.nil? || value == [] || value == {}
+
+    if value.is_a?(Array) && value.first.is_a?(Hash)
+      value.each do |row|
+        render(row)
+      end
+    elsif value.is_a?(Array) && (key.to_s == "rows" || value.join(" ").length > 80 || value.any? { |v|
+ v.to_s.include?(" ")
+    })
+      puts("#{key}:", value.map { |v| "  #{v}" })
+    else
+      puts "#{key}=#{scalar_line(value)}"
+    end
+  end
+end
+
+def help_for(cmd)
+  parser = OptionParser.new
+  parser.banner = "bin/agent-cli #{cmd.name} #{cmd.usage}".squeeze(" ").strip + " [--json]\n#{cmd.summary}"
+  parser
+end
+
+def root_help
+  width = COMMANDS.keys.map(&:length).max
+  puts "bin/agent-cli COMMAND [--json] [--help]", "exit: 0 ok, 1 check failed, 2 usage", ""
+  COMMANDS.each_value { |c| puts "#{c.name.ljust(width)}  #{c.summary}" }
+end
+
+def dispatch(argv)
+  name = argv.shift
+  return root_help if [ nil, "help", "-h", "--help" ].include?(name)
+
+  cmd = COMMANDS.fetch(name) { raise OptionParser::InvalidArgument, "unknown command: #{name}" }
+  opts = {}
+  parser = help_for(cmd)
+  parser.on("--json", "machine-readable output") { opts[:json] = true }
+  cmd.options&.call(parser, opts)
+  parser.on("-h", "--help", "this help") do
+    puts parser
+    return
+  end
+  args = parser.permute(argv)
+  begin
+    result = cmd.run.call(opts, args)
+  rescue Failure => e
+    report_failure(e, opts)
+    exit 1
+  end
+  opts[:json] ? puts(JSON.generate(result.except(:_exit, "_exit"))) : render(result)
+  exit(result[:_exit] || result["_exit"] || 0)
+end
+
+def report_failure(error, opts)
+  opts[:json] ? puts(JSON.generate(error: error.message)) : warn(error.message)
+end
+
+begin
+  dispatch(ARGV.dup)
+rescue OptionParser::ParseError => e
+  warn e.message
+  exit 2
+rescue Errno::EPIPE
+  exit 0
+end

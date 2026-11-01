@@ -1,5 +1,7 @@
 # Agent Guidelines for Fid (Rails 8.0.1 / Ruby 3.3.1)
 
+Usar agent-cli primero, tiene prioridad por sobre releer archivos o adivinar comandos. (`bin/agent-cli --help`)
+
 ## Build/Lint/Test Commands
 - Run all tests: `bin/rails test`
 - Run single test file: `bin/rails test test/controllers/fid_controller_test.rb`
